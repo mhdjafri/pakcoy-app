@@ -10,9 +10,12 @@ import tensorflow as tf  # Impor TF ditaruh setelah os.environ
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Menyembunyikan GPU dari TensorFlow dan menonaktifkan optimasi XLA CUDA
+# Paksa TensorFlow hanya pakai CPU agar tidak error CUDA
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+st.title("Aplikasi Streamlit Pertama Saya")
+st.write("TensorFlow versi:", tf.__version__)
 
 
 
