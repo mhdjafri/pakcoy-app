@@ -1,10 +1,11 @@
 import os
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# 1. WAJIB DI BARIS PALING ATAS (Sebelum import TF dan ST)
+# 1. KONTROL ENVIRONMENT (Wajib paling atas)
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
@@ -17,79 +18,97 @@ from PIL import Image, ImageOps
 
 # Konfigurasi Halaman Streamlit
 st.set_page_config(page_title="Monitoring Pakcoy", layout="wide")
-st.title("🌱 Aplikasi Monitoring & Prediksi Pakcoy")
+st.title("🌱 Dashboard Realtime & Prediksi Pakcoy")
 
 BASE = Path(__file__).parent
-MODELS, DATA = BASE / "models", BASE / "data"
+DATA, MODELS = BASE / "data", BASE / "models"
 DB = DATA / "app.db"
 IMG = 224
 
-# ---------------------------------------------------------------- Database & Model
+# ---------------------------------------------------------------- Database & Init Data
 def db():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     return con
 
-@st.cache_resource
-def load_models():
-    """Memuat model sekali saja dan disimpan di cache Streamlit"""
-    tmp = {}
-    tmp["cfg"] = json.load(open(MODELS / "config.json"))
-    tmp["lstm"] = tf.keras.models.load_model(MODELS / "lstm_sensor.keras")
-    tmp["cnn"] = tf.keras.models.load_model(MODELS / "cnn_tahap_pakcoy.keras")
-    
-    sc = json.load(open(MODELS / "scaler_sensor.json"))
-    tmp["smin"] = np.array(sc["data_min"], dtype="float32")
-    tmp["smax"] = np.array(sc["data_max"], dtype="float32")
-    
-    uk = pd.read_csv(MODELS / "ukuran_referensi.csv", sep=None, engine="python")
-    uk.columns = [c.strip().lower() for c in uk.columns]
-    for c in ("dap", "lebar_daun_cm", "tinggi_cm"):
-        uk[c] = uk[c].astype(str).str.replace(",", ".", regex=False).astype(float)
-    tmp["uk"] = uk
-    tmp["k_lebar"] = np.poly1d(np.polyfit(uk["dap"], uk["lebar_daun_cm"], 2))
-    tmp["k_tinggi"] = np.poly1d(np.polyfit(uk["dap"], uk["tinggi_cm"], 2))
-    return tmp
+def init_db():
+    """Memastikan database terisi dari file Excel jika kosong"""
+    con = db()
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS sensor (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT, dap INTEGER, jam INTEGER, moisture REAL, temp REAL);
+    """)
+    if con.execute("SELECT COUNT(*) FROM sensor").fetchone()[0] == 0:
+        xlsx = next(DATA.glob("*.xlsx"), None)
+        if xlsx is not None:
+            d = pd.read_excel(xlsx)
+            d["jam"] = d["Time"].astype(str).str[:2].astype(int)
+            d = d.sort_values(["Day", "jam"])
+            tgl_mulai = datetime(2026, 1, 1)
+            rows = [((tgl_mulai + timedelta(days=int(day) - 1, hours=int(jam))).isoformat(),
+                     int(dap), int(jam), float(kel), float(suhu))
+                    for day, dap, jam, kel, suhu in zip(d["Day"], d["DAP"], d["jam"],
+                                                        d["Soil Moisture (%)"], d["Temperature (°C)"])]
+            con.executemany("INSERT INTO sensor (ts,dap,jam,moisture,temp) VALUES (?,?,?,?,?)", rows)
+            con.commit()
+    con.close()
 
-# Load model secara aman
-try:
-    m = load_models()
-    st.success("✅ Semua model AI berhasil dimuat!")
-except Exception as e:
-    st.error(f"❌ Gagal memuat model: {e}")
-    st.stop()
+init_db()
 
-# ---------------------------------------------------------------- UI Aplikasi Streamlit
-tab1, tab2 = st.tabs(["📊 Data Sensor & Prediksi", "📷 Analisis Citra Pakcoy"])
+# ---------------------------------------------------------------- State Kontrol Replay
+# Menyimpan posisi index data simulasi saat ini di memory Streamlit
+if "posisi_kursor" not in st.session_state:
+    st.session_state.posisi_kursor = 40  # Mulai menampilkan dari 40 data awal
 
-with tab1:
-    st.header("Monitoring Sensor")
-    # Tampilkan input manual atau ambil dari database SQLite Anda
-    dap_input = st.number_input("Masukkan Usia Tanaman (DAP):", min_value=1, max_value=60, value=10)
-    
-    # Estimasi Ukuran
-    uk = m["uk"]
-    d = float(np.clip(dap_input, uk["dap"].min(), uk["dap"].max()))
-    lebar = round(float(m["k_lebar"](d)), 1)
-    tinggi = round(float(m["k_tinggi"](d)), 1)
-    
-    col1, col2 = st.columns(2)
-    col1.metric("Estimasi Lebar Daun", f"{lebar} cm")
-    col2.metric("Estimasi Tinggi Tanaman", f"{tinggi} cm")
+# Dapatkan total baris data yang tersedia
+con = db()
+total_data = con.execute("SELECT COUNT(*) FROM sensor").fetchone()[0]
+con.close()
 
-with tab2:
-    st.header("Analisis Foto Pakcoy")
-    file_gambar = st.file_uploader("Unggah foto pakcoy Anda", type=["jpg", "jpeg", "png"])
+# Otomatis maju 1 baris setiap halaman dimuat ulang (Simulasi Realtime)
+if st.session_state.posisi_kursor < total_data:
+    st.session_state.posisi_kursor += 1
+else:
+    st.session_state.posisi_kursor = 40  # Reset ke awal jika data habis (Looping)
+
+# Ambil data terbaru batas index saat ini
+def ambil_data_live(posisi, limit=40):
+    con = db()
+    rows = con.execute("SELECT * FROM sensor WHERE id <= ? ORDER BY id DESC LIMIT ?", (posisi, limit)).fetchall()
+    con.close()
+    return pd.DataFrame([dict(r) for r in reversed(rows)])
+
+df_live = ambil_data_live(st.session_state.posisi_kursor)
+
+# ---------------------------------------------------------------- Tampilan Widget Utama
+if not df_live.empty:
+    baris_terakhir = df_live.iloc[-1]
     
-    if file_gambar is not None:
-        image = Image.open(file_gambar)
-        st.image(image, caption="Gambar yang diunggah", use_container_width=True)
-        
-        # Klasifikasi Gambar via CNN
-        im = ImageOps.exif_transpose(image).convert("RGB").resize((IMG, IMG))
-        pr = m["cnn"].predict(np.array(im, dtype="float32")[None], verbose=0)[0]
-        kelas_prediksi = m["cfg"]["kelas"][int(pr.argmax())]
-        keyakinan = float(pr.max()) * 100
-        
-        st.metric("Hasil Tahap CNN", kelas_prediksi)
-        st.metric("Tingkat Keyakinan AI", f"{keyakinan:.2f}%")
+    # Ringkasan Angka Indikator Atas
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Kelembaban Tanah (Moisture)", f"{baris_terakhir['moisture']}%")
+    kpi2.metric("Suhu Lingkungan", f"{baris_terakhir['temp']} °C")
+    kpi3.metric("Usia Tanaman (DAP)", f"{int(baris_terakhir['dap'])} Hari")
+
+    # Layout Grafik Realtime Bergerak
+    col_grafik_moisture, col_grafik_temp = st.columns(2)
+    
+    with col_grafik_moisture:
+        st.subheader("💧 Grafik Kelembaban Tanah Realtime")
+        # Menggunakan kolom 'ts' atau indeks sebagai penanda waktu X
+        st.line_chart(df_live.set_index('ts')[['moisture']], height=300)
+
+    with col_grafik_temp:
+        st.subheader("🌡️ Grafik Suhu Lingkungan Realtime")
+        st.line_chart(df_live.set_index('ts')[['temp']], height=300, color="#FF4B4B")
+else:
+    st.warning("Data sensor tidak ditemukan di database.")
+
+# ---------------------------------------------------------------- Kontrol Interval Replay
+# Teks info debug posisi simulasi
+st.caption(f"Simulasi Replay aktif: Menampilkan data ke-{st.session_state.posisi_kursor} dari total {total_data} data sensor. Diperbarui otomatis tiap 5 detik.")
+
+# Delay 5 detik lalu picu Streamlit untuk me-refresh halaman guna memajukan data
+time.sleep(5)
+st.rerun()
