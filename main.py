@@ -5,6 +5,8 @@ Mode DEMO (default): data sensor dari Excel diputar ulang satu pembacaan per per
 Mode sensor asli   : set DEMO_MODE=0 dan kirim data dengan POST /api/sensor
 """
 import os, json, sqlite3, threading
+import streamlit as st
+import tensorflow as tf  # Impor TF ditaruh setelah os.environ
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -12,8 +14,6 @@ from pathlib import Path
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
 
-import streamlit as st
-import tensorflow as tf  # Impor TF ditaruh setelah os.environ
 
 
 import numpy as np
