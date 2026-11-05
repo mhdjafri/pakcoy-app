@@ -8,6 +8,14 @@ import os, json, sqlite3, threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Menyembunyikan GPU dari TensorFlow dan menonaktifkan optimasi XLA CUDA
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+
+import streamlit as st
+import tensorflow as tf  # Impor TF ditaruh setelah os.environ
+
+
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
