@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+tensorflow
+keras>=3.13
+numpy
+pandas
+openpyxl
+pillow

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitoring Pakcoy</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f4f7f4; --card:#fff; --tx:#1d2b1d; --mut:#6b7a6b; --line:#e1e8e1; --g:#2e7d32; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121712; --card:#1c241c; --tx:#e6efe6; --mut:#93a393; --line:#2b362b; --g:#66bb6a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--tx); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+  h1 { font-size:20px; margin:0; } h2 { font-size:15px; margin:0 0 12px; }
+  .badge { font-size:12px; padding:3px 10px; border-radius:99px; background:var(--card); border:1px solid var(--line); color:var(--mut); }
+  main { padding:20px 24px; display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); max-width:1300px; margin:auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; min-width:0; }
+  .wide { grid-column: 1 / -1; }
+  .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:12px; }
+  .stat .v { font-size:28px; font-weight:600; } .stat .l { font-size:12px; color:var(--mut); }
+  .chart { position:relative; height:240px; }
+  .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  input[type=range] { width:100%; }
+  button { background:var(--g); color:#fff; border:0; padding:9px 16px; border-radius:8px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  .scroll { overflow-x:auto; }
+  .res { margin-top:12px; font-size:14px; line-height:1.6; }
+  .err { color:#c62828; }
+  #plant { width:200px; height:260px; flex:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌱 Monitoring Pertumbuhan Pakcoy</h1>
+  <span class="badge" id="mode">memuat…</span>
+</header>
+
+<main>
+  <section class="card wide">
+    <div class="stats">
+      <div class="stat"><div class="v" id="sSuhu">–</div><div class="l">Suhu terakhir (°C)</div></div>
+      <div class="stat"><div class="v" id="sLembab">–</div><div class="l">Kelembaban tanah (%)</div></div>
+      <div class="stat"><div class="v" id="sDap">–</div><div class="l">Usia data (DAP, hari)</div></div>
+      <div class="stat"><div class="v" id="sTahap">–</div><div class="l">Tahap (hasil CNN terakhir)</div></div>
+    </div>
+  </section>
+
+  <section class="card"><h2>Suhu (langsung)</h2><div class="chart"><canvas id="cSuhu"></canvas></div></section>
+  <section class="card"><h2>Kelembaban tanah (langsung)</h2><div class="chart"><canvas id="cLembab"></canvas></div></section>
+
+  <section class="card wide">
+    <h2>Prediksi 4 hari ke depan (LSTM)</h2>
+    <div class="chart"><canvas id="cPred"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Ukuran tanaman berdasarkan usia</h2>
+    <div class="row">
+      <svg id="plant" viewBox="0 0 200 260" aria-label="Ilustrasi tanaman"></svg>
+      <div style="flex:1; min-width:160px">
+        <label for="dap">Usia: <b id="dapVal">25</b> hari setelah tanam</label>
+        <input type="range" id="dap" min="10" max="40" value="25">
+        <div class="res">Lebar daun: <b id="uLebar">–</b> cm<br>Tinggi tanaman: <b id="uTinggi">–</b> cm</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Analisis gambar tanaman (CNN)</h2>
+    <p style="font-size:13px;color:var(--mut);margin-top:0">Pilih foto, lalu klik analisis. Usia diambil dari slider di sebelah.</p>
+    <input type="file" id="foto" accept="image/jpeg,image/png"><br><br>
+    <button id="btn">Analisis</button>
+    <div class="res" id="hasil"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Riwayat analisis</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Waktu</th><th>DAP</th><th>Tahap</th><th>Keyakinan</th><th>Suhu</th><th>Lembab</th><th>Lebar daun</th><th>Tinggi</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+const NAMA_TAHAP = { masa_pertumbuhan:'Masa pertumbuhan', mendekati_panen:'Mendekati panen', siap_panen:'Siap panen' };
+const $ = id => document.getElementById(id);
+
+function lineChart(id, label, color) {
+  return new Chart($(id), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: color + '22', fill: true, tension: .3, pointRadius: 0 }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
+               plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 6 } } } }
+  });
+}
+const cSuhu = lineChart('cSuhu', 'Suhu (°C)', '#e53935');
+const cLembab = lineChart('cLembab', 'Kelembaban (%)', '#1e88e5');
+const cPred = new Chart($('cPred'), {
+  type: 'line',
+  data: { labels: [], datasets: [
+    { label: 'Suhu (°C)', data: [], borderColor: '#e53935', tension: .3, yAxisID: 'y' },
+    { label: 'Kelembaban (%)', data: [], borderColor: '#1e88e5', tension: .3, yAxisID: 'y1' } ] },
+  options: { responsive: true, maintainAspectRatio: false,
+    scales: { y: { position: 'left', title: { display: true, text: '°C' } },
+              y1: { position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '%' } } } }
+});
+
+function setChart(ch, labels, data) { ch.data.labels = labels; ch.data.datasets[0].data = data; ch.update(); }
+const fmtJam = ts => ts.slice(5, 10) + ' ' + ts.slice(11, 16);
+
+async function getJSON(url, opt) {
+  const r = await fetch(url, opt);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch (e) {} throw new Error(m); }
+  return r.json();
+}
+
+async function refreshSensor() {
+  try {
+    const { demo, data } = await getJSON('/api/sensor/live?n=40');
+    $('mode').textContent = demo ? 'Mode demo (data diputar ulang)' : 'Sensor langsung';
+    if (!data.length) return;
+    const last = data[data.length - 1];
+    $('sSuhu').textContent = last.temp.toFixed(1);
+    $('sLembab').textContent = last.moisture.toFixed(0);
+    $('sDap').textContent = last.dap;
+    const lab = data.map(d => fmtJam(d.ts));
+    setChart(cSuhu, lab, data.map(d => d.temp));
+    setChart(cLembab, lab, data.map(d => d.moisture));
+  } catch (e) { $('mode').textContent = 'Gagal memuat sensor'; }
+}
+
+async function refreshPred() {
+  try {
+    const { prediksi } = await getJSON('/api/prediksi');
+    cPred.data.labels = prediksi.map(p => 'H+' + p.hari_ke + ' ' + String(p.jam).padStart(2, '0') + ':00');
+    cPred.data.datasets[0].data = prediksi.map(p => p.temp);
+    cPred.data.datasets[1].data = prediksi.map(p => p.moisture);
+    cPred.update();
+  } catch (e) { console.warn('prediksi:', e.message); }
+}
+
+function drawPlant(lebar, tinggi) {
+  const batang = 20 + tinggi * 6, base = 240, w = lebar * 7;
+  let s = `<rect x="60" y="${base}" width="80" height="10" rx="4" fill="#8d6e63"/>`;
+  s += `<rect x="94" y="${base - batang}" width="12" height="${batang}" rx="5" fill="#9ccc65"/>`;
+  [0.25, 0.5, 0.78].forEach((f, i) => {
+    const y = base - batang * f, sz = w * (1 - i * 0.12);
+    s += `<ellipse cx="${100 - sz * 0.55}" cy="${y}" rx="${sz * 0.55}" ry="${sz * 0.3}" fill="#43a047" transform="rotate(-20 ${100 - sz * 0.55} ${y})"/>`;
+    s += `<ellipse cx="${100 + sz * 0.55}" cy="${y}" rx="${sz * 0.55}" ry="${sz * 0.3}" fill="#2e7d32" transform="rotate(20 ${100 + sz * 0.55} ${y})"/>`;
+  });
+  $('plant').innerHTML = s;
+}
+
+async function refreshUkuran() {
+  const dap = $('dap').value; $('dapVal').textContent = dap;
+  try {
+    const u = await getJSON('/api/ukuran?dap=' + dap);
+    $('uLebar').textContent = u.lebar_daun_cm; $('uTinggi').textContent = u.tinggi_cm;
+    drawPlant(u.lebar_daun_cm, u.tinggi_cm);
+  } catch (e) { $('uLebar').textContent = '–'; }
+}
+
+async function refreshRiwayat() {
+  try {
+    const rows = await getJSON('/api/riwayat?limit=15');
+    $('tbody').innerHTML = rows.map(r => `<tr><td>${r.waktu.replace('T', ' ')}</td><td>${r.dap}</td>
+      <td>${NAMA_TAHAP[r.tahap_cnn] || r.tahap_cnn}</td><td>${(r.keyakinan * 100).toFixed(0)}%</td>
+      <td>${r.suhu_terakhir}°C</td><td>${r.kelembaban_terakhir}%</td>
+      <td>${r.lebar_daun_cm} cm</td><td>${r.tinggi_cm} cm</td></tr>`).join('');
+    if (rows.length) $('sTahap').textContent = NAMA_TAHAP[rows[0].tahap_cnn] || rows[0].tahap_cnn;
+  } catch (e) { console.warn('riwayat:', e.message); }
+}
+
+$('btn').addEventListener('click', async () => {
+  const f = $('foto').files[0];
+  if (!f) { $('hasil').innerHTML = '<span class="err">Pilih foto dulu.</span>'; return; }
+  const fd = new FormData(); fd.append('gambar', f); fd.append('dap', $('dap').value);
+  $('btn').disabled = true; $('hasil').textContent = 'Menganalisis…';
+  try {
+    const h = await getJSON('/api/analisis', { method: 'POST', body: fd });
+    $('hasil').innerHTML = `Tahap: <b>${NAMA_TAHAP[h.tahap] || h.tahap}</b> (keyakinan ${(h.keyakinan * 100).toFixed(0)}%)`;
+    refreshRiwayat(); refreshPred();
+  } catch (e) { $('hasil').innerHTML = `<span class="err">Gagal: ${e.message}</span>`; }
+  $('btn').disabled = false;
+});
+$('dap').addEventListener('input', refreshUkuran);
+
+refreshSensor(); refreshPred(); refreshUkuran(); refreshRiwayat();
+setInterval(refreshSensor, 3000);   // grafik bergerak tiap 3 detik
+setInterval(refreshPred, 15000);
+</script>
+</body>
+</html>

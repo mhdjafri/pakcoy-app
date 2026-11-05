@@ -1,0 +1,1 @@
+{"lookback": 21, "horizon": 12, "fitur": ["moisture", "temp", "jam_sin", "jam_cos"], "kelas": ["masa_pertumbuhan", "mendekati_panen", "siap_panen"]}
